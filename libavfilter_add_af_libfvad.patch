@@ -1,0 +1,312 @@
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index f059f3f..d00a4d2 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -156,6 +156,7 @@ OBJS-$(CONFIG_TREMOLO_FILTER)                += af_tremolo.o
+ OBJS-$(CONFIG_VIBRATO_FILTER)                += af_vibrato.o generate_wave_table.o
+ OBJS-$(CONFIG_VOLUME_FILTER)                 += af_volume.o
+ OBJS-$(CONFIG_VOLUMEDETECT_FILTER)           += af_volumedetect.o
++OBJS-$(CONFIG_FVAD_FILTER)                   += af_fvad.o
+ 
+ OBJS-$(CONFIG_AEVALSRC_FILTER)               += aeval.o
+ OBJS-$(CONFIG_AFIRSRC_FILTER)                += asrc_afirsrc.o
+diff --git a/libavfilter/af_fvad.c b/libavfilter/af_fvad.c
+new file mode 100644
+index 0000000..203ef8c
+--- /dev/null
++++ b/libavfilter/af_fvad.c
+@@ -0,0 +1,282 @@
++/*
++ * Copyright (c) 2012 Nicolas George
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public License
++ * as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with FFmpeg; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include "libavutil/channel_layout.h"
++#include "libavutil/avassert.h"
++#include "libavutil/timestamp.h"
++#include "audio.h"
++#include "avfilter.h"
++#include "internal.h"
++#include "fvad.h"
++
++typedef struct VoiceActivityDetectContext {
++    /* a part of member of SilenceDetectContext */
++    int64_t duration;
++    int64_t nb_null_samples;
++    int64_t start;
++    int64_t frame_end;
++    int last_sample_rate;
++    AVRational time_base;
++
++    Fvad *fvad;
++    int sample_rate;
++    float thres;
++    int lastresultnum;
++    float *lastresult;
++    int lastp;
++    int min_samples;
++    int max_samples;
++    int counter;
++} VoiceActivityDetectContext;
++
++static void set_meta(AVFrame *insamples, int channel, const char *key, char *value)
++{
++    char key2[128];
++
++    if (channel)
++        snprintf(key2, sizeof(key2), "lavfi.%s.%d", key, channel);
++    else
++        snprintf(key2, sizeof(key2), "lavfi.%s", key);
++    av_dict_set(&insamples->metadata, key2, value, 0);
++}
++static av_always_inline void update(AVFilterContext *ctx, AVFrame *insamples,
++                                    int is_silence, int current_sample, int64_t nb_samples_notify,
++                                    AVRational time_base)
++{
++    VoiceActivityDetectContext *vad = ctx->priv;
++    if (is_silence) {
++        if (vad->start == INT64_MIN) {
++            if (vad->nb_null_samples >= nb_samples_notify) {
++                vad->start = insamples->pts + av_rescale_q(current_sample + 1 - nb_samples_notify,
++                        (AVRational){ 1, vad->last_sample_rate }, time_base);
++                set_meta(insamples, 0, "fvad.silence_start",
++                        av_ts2timestr(vad->start, &time_base));
++                av_log(ctx, AV_LOG_INFO, "silence_start: %s\n",
++                        av_ts2timestr(vad->start, &time_base));
++            }
++        }
++    } else {
++        if (vad->start > INT64_MIN) {
++            int64_t end_pts = insamples ? insamples->pts + av_rescale_q(current_sample,
++                    (AVRational){ 1, vad->last_sample_rate }, time_base)
++                    : vad->frame_end;
++            int64_t duration_ts = end_pts - vad->start;
++            if (insamples) {
++                set_meta(insamples, 0, "fvad.silence_end",
++                        av_ts2timestr(end_pts, &time_base));
++                set_meta(insamples, 0, "fvad.silence_duration",
++                        av_ts2timestr(duration_ts, &time_base));
++            }
++            av_log(ctx, AV_LOG_INFO, "silence_end: %s | silence_duration: %s\n",
++                    av_ts2timestr(end_pts, &time_base),
++                    av_ts2timestr(duration_ts, &time_base));
++        }
++        vad->nb_null_samples = 0;
++        vad->start = INT64_MIN;
++    }
++}
++
++static void dispose(VoiceActivityDetectContext *vad)
++{
++    if (vad->fvad != NULL) {
++        fvad_free(vad->fvad);
++        vad->fvad = NULL;
++    }
++    if (vad->lastresult != NULL) {
++        av_freep(&vad->lastresult);
++        vad->lastresult = NULL;
++    }
++}
++
++static av_cold int init(AVFilterContext *ctx)
++{
++    VoiceActivityDetectContext *vad = ctx->priv;
++    int ret;
++
++    vad->duration = 2000000;
++
++    vad->fvad = fvad_new();
++    if (vad->fvad == NULL) {
++        return AVERROR(ENOMEM);
++    }
++
++    vad->sample_rate = 48000;
++    vad->thres       = 0.5;
++    vad->lastresultnum = 5;
++    vad->min_samples = INT_MAX;
++    vad->lastresult = av_malloc_array(sizeof(*vad->lastresult), vad->lastresultnum);
++    if (vad->lastresult == NULL) {
++        dispose(vad);
++        return AVERROR(ENOMEM);
++    }
++    for (int i = 0; i < vad->lastresultnum; i++) vad->lastresult[i] = 0;
++    vad->lastp = 0;
++
++    ret = fvad_set_sample_rate(vad->fvad, vad->sample_rate);
++    if (ret < 0) {
++        dispose(vad);
++        return AVERROR(EINVAL);
++    }
++
++    ret = fvad_set_mode(vad->fvad, 0 /* ("quality") */);
++    if (ret < 0) {
++        dispose(vad);
++        return AVERROR(EINVAL);
++    }
++
++    return 0;
++}
++
++static int query_formats(AVFilterContext *ctx)
++{
++    VoiceActivityDetectContext *vad = ctx->priv;
++    static const enum AVSampleFormat sample_fmts[] = {
++        AV_SAMPLE_FMT_S16,
++        AV_SAMPLE_FMT_S16P,
++        AV_SAMPLE_FMT_NONE
++    };
++    int64_t chlayouts[] = { FF_COUNT2LAYOUT(1) , -1 };
++    int sample_rates[] = { vad->sample_rate, -1 };
++    int ret;
++
++    ret = ff_set_common_formats_from_list(ctx, sample_fmts);
++    if (ret < 0)
++        return ret;
++
++    ret = ff_set_common_channel_layouts_from_list(ctx, chlayouts);
++    if (ret < 0)
++        return ret;
++
++    return ff_set_common_samplerates_from_list(ctx, sample_rates);
++}
++
++static int config_input(AVFilterLink *inlink)
++{
++    AVFilterContext *ctx = inlink->dst;
++    VoiceActivityDetectContext *vad = ctx->priv;
++
++    vad->duration = av_rescale(vad->duration, inlink->sample_rate, AV_TIME_BASE);
++    vad->start = INT64_MIN;
++
++    return 0;
++}
++
++static int filter_frame(AVFilterLink *inlink, AVFrame *samples)
++{
++    AVFilterContext *ctx = inlink->dst;
++    VoiceActivityDetectContext *vad = ctx->priv;
++    int nb_samples  = samples->nb_samples;
++    int srate = vad->sample_rate;
++    int step = srate / 100;
++    int proceed;
++    int16_t *pcm;
++    const int64_t nb_samples_notify = vad->duration;
++
++    // scale number of null samples to the new sample rate
++    if (vad->last_sample_rate && vad->last_sample_rate != srate)
++        vad->nb_null_samples = srate * vad->nb_null_samples / vad->last_sample_rate;
++    vad->last_sample_rate = srate;
++    vad->time_base = inlink->time_base;
++    vad->frame_end = samples->pts + av_rescale_q(nb_samples,
++            (AVRational){ 1, vad->last_sample_rate }, inlink->time_base);
++
++    if (vad->min_samples > nb_samples)
++        vad->min_samples = nb_samples;
++    if (vad->max_samples < nb_samples)
++        vad->max_samples = nb_samples;
++
++    pcm = (int16_t *)samples->extended_data[0];
++    for (proceed = 0; proceed < nb_samples; proceed += step) {
++        int current = step <= nb_samples - proceed ? proceed : nb_samples - step;
++	if (current < 0) {
++            return AVERROR(EINVAL);
++        }
++        // 参考 : https://github.com/julius-speech/julius/blob/master/libjulius/src/adin-cut.c
++        {
++            float sum = 0;
++            int ret = fvad_process(vad->fvad, pcm + current, step);
++            int is_silence;
++            if (ret < 0) {
++                return AVERROR(EINVAL);
++            }
++            vad->lastresult[vad->lastp] = (float)ret / step * (step - (proceed - current));
++            if (++vad->lastp >= vad->lastresultnum) vad->lastp -= vad->lastresultnum;
++            /* get smoothed result from last 5 ticks */
++            for (int j = 0; j < vad->lastresultnum; ++j) sum += (float)vad->lastresult[j];
++            sum /= (float)vad->lastresultnum;
++            /* judge */
++            if (sum >= vad->thres)
++               is_silence = 0;
++            else
++                is_silence = 1;
++
++            if (is_silence) {
++                vad->nb_null_samples += step + proceed - current;
++            }
++            update(ctx, samples, is_silence, current, nb_samples_notify, inlink->time_base);
++	}
++    }
++
++    return ff_filter_frame(inlink->dst->outputs[0], samples);
++}
++
++static void print_stats(AVFilterContext *ctx)
++{
++    VoiceActivityDetectContext *vad = ctx->priv;
++    av_log(ctx, AV_LOG_INFO, "min : %d, max : %d, cnt : %d\n", vad->min_samples, vad->max_samples, vad->counter);
++}
++
++static av_cold void uninit(AVFilterContext *ctx)
++{
++    VoiceActivityDetectContext *vad = ctx->priv;
++
++    print_stats(ctx);
++
++    if (vad->start > INT64_MIN)
++        update(ctx, NULL, 0, 0, 0, vad->time_base);
++    dispose(vad);
++}
++
++static const AVFilterPad fvad_inputs[] = {
++    {
++        .name         = "default",
++        .type         = AVMEDIA_TYPE_AUDIO,
++        .config_props = config_input,
++        .filter_frame = filter_frame,
++    },
++};
++
++static const AVFilterPad fvad_outputs[] = {
++    {
++        .name = "default",
++        .type = AVMEDIA_TYPE_AUDIO,
++    },
++};
++
++const AVFilter ff_af_fvad = {
++    .name          = "fvad",
++    .description   = NULL_IF_CONFIG_SMALL("Detect audio volume."),
++    .priv_size     = sizeof(VoiceActivityDetectContext),
++    .init          = init,
++    .query_formats = query_formats,
++    .uninit        = uninit,
++    FILTER_INPUTS(fvad_inputs),
++    FILTER_OUTPUTS(fvad_outputs),
++};
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index ddd6404..293ca17 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -150,6 +150,7 @@ extern const AVFilter ff_af_tremolo;
+ extern const AVFilter ff_af_vibrato;
+ extern const AVFilter ff_af_volume;
+ extern const AVFilter ff_af_volumedetect;
++extern const AVFilter ff_af_fvad;
+ 
+ extern const AVFilter ff_asrc_aevalsrc;
+ extern const AVFilter ff_asrc_afirsrc;
