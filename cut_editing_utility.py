@@ -1,12 +1,14 @@
+import click
 import ffmpeg
-import subprocess
 import io
+import subprocess
+import sys
 from subprocess import PIPE
 
-def get_stats_audio():
-    # ffmpeg -i testdata.mkv -af aformat=channel_layouts=FC,astats=metadata=1:measure_perchannel=none,ametadata=mode=print:file=metadata_astats.txt -f null -
+def get_stats_audio(input_file):
+    # ffmpeg -i $input_file -af aformat=channel_layouts=FC,astats=metadata=1:measure_perchannel=none,ametadata=mode=print:file=metadata_astats.txt -f null -
     out, err = (
-        ffmpeg.input('./testdata.mkv').audio
+        ffmpeg.input(input_file).audio
         .filter('aformat', channel_layouts="FC")
         .filter('astats', metadata=1, measure_perchannel="none")
         .filter('ametadata', mode="print", file="metadata_astats.txt")
@@ -22,10 +24,10 @@ def get_stats_audio():
         cnt += 1
     return sum / cnt
 
-def proc_audio(dc_offset = 0.):
-    # ffmpeg -i testdata.mkv -af aformat=channel_layouts=FC,dcshift=shift=$dc_offset,agate,silencedetect=noise=0.1,ametadata=mode=print:file=metadata.txt -f null -
+def proc_audio(input_file, dc_offset = 0.):
+    # ffmpeg -i $input_file -af aformat=channel_layouts=FC,dcshift=shift=$dc_offset,agate,silencedetect=noise=0.1,fvad,ametadata=mode=print:file=metadata.txt -f null -
     out, err = (
-        ffmpeg.input('./testdata.mkv').audio
+        ffmpeg.input(input_file).audio
         .filter('aformat', channel_layouts="FC")
         .filter('dcshift', shift="{0:f}".format(-dc_offset))
         .filter('agate')
@@ -42,5 +44,11 @@ def proc_audio(dc_offset = 0.):
         print("{0:40}:{1}".format(items[0], items[1]))
     return
 
-dc_offset = get_stats_audio()
-proc_audio(dc_offset)
+@click.command()
+@click.argument('input_file')
+def command(input_file):
+    dc_offset = get_stats_audio(input_file)
+    proc_audio(input_file, dc_offset)
+
+if __name__ == '__main__':
+    command()
