@@ -12,10 +12,10 @@ index f059f3f..d00a4d2 100644
  OBJS-$(CONFIG_AFIRSRC_FILTER)                += asrc_afirsrc.o
 diff --git a/libavfilter/af_fvad.c b/libavfilter/af_fvad.c
 new file mode 100644
-index 0000000..203ef8c
+index 0000000..21543b9
 --- /dev/null
 +++ b/libavfilter/af_fvad.c
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,313 @@
 +/*
 + * Copyright (c) 2012 Nicolas George
 + *
@@ -44,6 +44,9 @@ index 0000000..203ef8c
 +#include "internal.h"
 +#include "fvad.h"
 +
++#define RING_BUFFER_LENGTH (2048)
++#define STEP (480)
++
 +typedef struct VoiceActivityDetectContext {
 +    /* a part of member of SilenceDetectContext */
 +    int64_t duration;
@@ -55,13 +58,15 @@ index 0000000..203ef8c
 +
 +    Fvad *fvad;
 +    int sample_rate;
-+    float thres;
-+    int lastresultnum;
-+    float *lastresult;
-+    int lastp;
 +    int min_samples;
 +    int max_samples;
 +    int counter;
++    int16_t buffer[RING_BUFFER_LENGTH];
++    int ringmask;
++    int size;
++    int head;
++    int tail;
++    int16_t pcm[STEP];
 +} VoiceActivityDetectContext;
 +
 +static void set_meta(AVFrame *insamples, int channel, const char *key, char *value)
@@ -69,22 +74,23 @@ index 0000000..203ef8c
 +    char key2[128];
 +
 +    if (channel)
-+        snprintf(key2, sizeof(key2), "lavfi.%s.%d", key, channel);
++        snprintf(key2, sizeof(key2), "lavfi.fvad.%s.%d", key, channel);
 +    else
-+        snprintf(key2, sizeof(key2), "lavfi.%s", key);
++        snprintf(key2, sizeof(key2), "lavfi.fvad.%s", key);
 +    av_dict_set(&insamples->metadata, key2, value, 0);
 +}
 +static av_always_inline void update(AVFilterContext *ctx, AVFrame *insamples,
 +                                    int is_silence, int current_sample, int64_t nb_samples_notify,
 +                                    AVRational time_base)
 +{
++    // 参考 : https://github.com/FFmpeg/FFmpeg/blob/master/libavfilter/af_silencedetect.c
 +    VoiceActivityDetectContext *vad = ctx->priv;
 +    if (is_silence) {
 +        if (vad->start == INT64_MIN) {
 +            if (vad->nb_null_samples >= nb_samples_notify) {
 +                vad->start = insamples->pts + av_rescale_q(current_sample + 1 - nb_samples_notify,
 +                        (AVRational){ 1, vad->last_sample_rate }, time_base);
-+                set_meta(insamples, 0, "fvad.silence_start",
++                set_meta(insamples, 0, "silence_start",
 +                        av_ts2timestr(vad->start, &time_base));
 +                av_log(ctx, AV_LOG_INFO, "silence_start: %s\n",
 +                        av_ts2timestr(vad->start, &time_base));
@@ -97,9 +103,9 @@ index 0000000..203ef8c
 +                    : vad->frame_end;
 +            int64_t duration_ts = end_pts - vad->start;
 +            if (insamples) {
-+                set_meta(insamples, 0, "fvad.silence_end",
++                set_meta(insamples, 0, "silence_end",
 +                        av_ts2timestr(end_pts, &time_base));
-+                set_meta(insamples, 0, "fvad.silence_duration",
++                set_meta(insamples, 0, "silence_duration",
 +                        av_ts2timestr(duration_ts, &time_base));
 +            }
 +            av_log(ctx, AV_LOG_INFO, "silence_end: %s | silence_duration: %s\n",
@@ -117,49 +123,6 @@ index 0000000..203ef8c
 +        fvad_free(vad->fvad);
 +        vad->fvad = NULL;
 +    }
-+    if (vad->lastresult != NULL) {
-+        av_freep(&vad->lastresult);
-+        vad->lastresult = NULL;
-+    }
-+}
-+
-+static av_cold int init(AVFilterContext *ctx)
-+{
-+    VoiceActivityDetectContext *vad = ctx->priv;
-+    int ret;
-+
-+    vad->duration = 2000000;
-+
-+    vad->fvad = fvad_new();
-+    if (vad->fvad == NULL) {
-+        return AVERROR(ENOMEM);
-+    }
-+
-+    vad->sample_rate = 48000;
-+    vad->thres       = 0.5;
-+    vad->lastresultnum = 5;
-+    vad->min_samples = INT_MAX;
-+    vad->lastresult = av_malloc_array(sizeof(*vad->lastresult), vad->lastresultnum);
-+    if (vad->lastresult == NULL) {
-+        dispose(vad);
-+        return AVERROR(ENOMEM);
-+    }
-+    for (int i = 0; i < vad->lastresultnum; i++) vad->lastresult[i] = 0;
-+    vad->lastp = 0;
-+
-+    ret = fvad_set_sample_rate(vad->fvad, vad->sample_rate);
-+    if (ret < 0) {
-+        dispose(vad);
-+        return AVERROR(EINVAL);
-+    }
-+
-+    ret = fvad_set_mode(vad->fvad, 0 /* ("quality") */);
-+    if (ret < 0) {
-+        dispose(vad);
-+        return AVERROR(EINVAL);
-+    }
-+
-+    return 0;
 +}
 +
 +static int query_formats(AVFilterContext *ctx)
@@ -196,15 +159,97 @@ index 0000000..203ef8c
 +    return 0;
 +}
 +
++static av_always_inline void proc_queue(VoiceActivityDetectContext *vad, int16_t *ext_buffer, int length)
++{
++    int *index_ptr;
++    int16_t *int_buffer;
++    int16_t **dst_ptr;
++    int16_t **src_ptr;
++    int current;
++    int abs_length = FFABS(length);
++
++    if (0 < length) {
++        index_ptr = &vad->tail;
++        dst_ptr = &int_buffer;
++        src_ptr = &ext_buffer;
++    } else {
++        index_ptr = &vad->head;
++        dst_ptr = &ext_buffer;
++        src_ptr = &int_buffer;
++    }
++    int_buffer = vad->buffer + *index_ptr;
++    current = *index_ptr;
++
++    vad->size += length;
++    *index_ptr = (*index_ptr + abs_length) & vad->ringmask;
++
++    if (*index_ptr < current) {
++        int tmp = vad->ringmask + 1 - current;
++        memcpy(*dst_ptr, *src_ptr, tmp * sizeof(int16_t));
++        ext_buffer += tmp;
++        int_buffer = vad->buffer;
++        memcpy(*dst_ptr, *src_ptr, (abs_length - tmp) * sizeof(int16_t));
++    } else {
++        memcpy(*dst_ptr, *src_ptr, abs_length * sizeof(int16_t));
++    }
++}
++
++static void push_queue(VoiceActivityDetectContext *vad, int16_t *src, int length)
++{
++    proc_queue(vad, src, length);
++}
++
++static void pop_queue(VoiceActivityDetectContext *vad, int16_t *dst, int length)
++{
++    proc_queue(vad, dst, -length);
++}
++
++static int get_queue_length(VoiceActivityDetectContext *vad)
++{
++    return vad->size;
++}
++
++static av_cold int init(AVFilterContext *ctx)
++{
++    VoiceActivityDetectContext *vad = ctx->priv;
++    int ret;
++
++    vad->duration = 2000000;
++
++    vad->fvad = fvad_new();
++    if (vad->fvad == NULL) {
++        return AVERROR(ENOMEM);
++    }
++
++    vad->sample_rate = 48000;
++    vad->min_samples = INT_MAX;
++
++    ret = fvad_set_sample_rate(vad->fvad, vad->sample_rate);
++    if (ret < 0) {
++        dispose(vad);
++        return AVERROR(EINVAL);
++    }
++
++    ret = fvad_set_mode(vad->fvad, 0 /* ("quality") */);
++    if (ret < 0) {
++        dispose(vad);
++        return AVERROR(EINVAL);
++    }
++
++    vad->ringmask = RING_BUFFER_LENGTH - 1;
++
++    return 0;
++}
++
 +static int filter_frame(AVFilterLink *inlink, AVFrame *samples)
 +{
 +    AVFilterContext *ctx = inlink->dst;
 +    VoiceActivityDetectContext *vad = ctx->priv;
 +    int nb_samples  = samples->nb_samples;
 +    int srate = vad->sample_rate;
-+    int step = srate / 100;
++    int step = STEP;
 +    int proceed;
-+    int16_t *pcm;
++    int16_t *pcm = vad->pcm;
 +    const int64_t nb_samples_notify = vad->duration;
 +
 +    // scale number of null samples to the new sample rate
@@ -215,41 +260,27 @@ index 0000000..203ef8c
 +    vad->frame_end = samples->pts + av_rescale_q(nb_samples,
 +            (AVRational){ 1, vad->last_sample_rate }, inlink->time_base);
 +
-+    if (vad->min_samples > nb_samples)
-+        vad->min_samples = nb_samples;
-+    if (vad->max_samples < nb_samples)
-+        vad->max_samples = nb_samples;
++    vad->min_samples = FFMIN(vad->min_samples, nb_samples);
++    vad->max_samples = FFMAX(vad->max_samples, nb_samples);
 +
-+    pcm = (int16_t *)samples->extended_data[0];
-+    for (proceed = 0; proceed < nb_samples; proceed += step) {
-+        int current = step <= nb_samples - proceed ? proceed : nb_samples - step;
-+	if (current < 0) {
-+            return AVERROR(EINVAL);
-+        }
-+        // 参考 : https://github.com/julius-speech/julius/blob/master/libjulius/src/adin-cut.c
++    push_queue(vad, (int16_t *)samples->extended_data[0], nb_samples);
++    if (RING_BUFFER_LENGTH < get_queue_length(vad)) {
++        return AVERROR(EINVAL);
++    }
++    for (proceed = -get_queue_length(vad); step <= get_queue_length(vad); proceed += step) {
++        pop_queue(vad, pcm, step);
 +        {
-+            float sum = 0;
-+            int ret = fvad_process(vad->fvad, pcm + current, step);
++            int ret = fvad_process(vad->fvad, pcm, step);
 +            int is_silence;
 +            if (ret < 0) {
 +                return AVERROR(EINVAL);
 +            }
-+            vad->lastresult[vad->lastp] = (float)ret / step * (step - (proceed - current));
-+            if (++vad->lastp >= vad->lastresultnum) vad->lastp -= vad->lastresultnum;
-+            /* get smoothed result from last 5 ticks */
-+            for (int j = 0; j < vad->lastresultnum; ++j) sum += (float)vad->lastresult[j];
-+            sum /= (float)vad->lastresultnum;
-+            /* judge */
-+            if (sum >= vad->thres)
-+               is_silence = 0;
-+            else
-+                is_silence = 1;
-+
++            is_silence = ret ? 0 : 1;
 +            if (is_silence) {
-+                vad->nb_null_samples += step + proceed - current;
++                vad->nb_null_samples += step;
 +            }
-+            update(ctx, samples, is_silence, current, nb_samples_notify, inlink->time_base);
-+	}
++            update(ctx, samples, is_silence, proceed, nb_samples_notify, inlink->time_base);
++	    }
 +    }
 +
 +    return ff_filter_frame(inlink->dst->outputs[0], samples);
