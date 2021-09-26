@@ -37,10 +37,10 @@ def proc_audio(input_file, dc_offset = 0.):
         .output('/dev/null', format="wav")
         .run(overwrite_output=True)
     )
-    proc = subprocess.run("cat metadata.txt | grep lavfi", shell=True, stdout=PIPE, stderr=PIPE, text=True)
+    proc = subprocess.run("cat metadata.txt | grep -E \"^lavfi\\.(s|fvad\\.s)\"", shell=True, stdout=PIPE, stderr=PIPE, text=True)
     f = io.StringIO(proc.stdout)
     for line in f:
-        items = line.rstrip("\n").split("=")
+        items = line.rstrip("\n").split("=", maxsplit=1)
         print("{0:40}:{1}".format(items[0], items[1]))
     return
 

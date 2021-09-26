@@ -3,7 +3,7 @@
 # Install Prerquisite
 - git
 - python
-- [libfvad](https://github.com/dpirch/libfvad)
+- [forked libfvad](https://github.com/mars2nico/libfvad) (from source)
 - FFmpeg (from source)
 
 # Dependency modules
@@ -19,6 +19,8 @@
 
 # Quick Start
 - Clone repository or download and extract this repository's Zip file.
+- Move into libfvad source code directory.
+- Build and install libfvad.
 - Move into FFmpeg source code directory.
 - Add the audio filter 'af_fvad' to FFmpeg source.
 

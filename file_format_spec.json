@@ -1,0 +1,34 @@
+
+[
+    {
+        "lavfi" : {
+            "fvad" : {
+                "const" : [{
+                    "weight" : { "type" : "number" }
+                }],
+                "markers" : [{
+                    "marked_range": {
+                        "duration": { "type" : "number" },
+                        "start_time": { "type": "number" }
+                    },
+                    "metadata" : { },
+                    "name" : { "type" : "string" }
+                }],
+                "test" : [{
+                    "h0" : { "type" : "number"},
+                    "h1" : { "type" : "number"}
+                }]
+            },
+            "markers" : [{
+                "marked_range": {
+                    "duration": { "type" : "number" },
+                    "start_time": { "type": "number" }
+                },
+                "metadata" : { },
+                "name" : { "type" : "string" }
+            }]
+        },
+        "pts": { "type": "number" },
+        "pts_time": { "type": "number" }
+    }
+]
