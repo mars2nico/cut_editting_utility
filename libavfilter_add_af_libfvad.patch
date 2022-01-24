@@ -1,8 +1,8 @@
 diff --git a/libavfilter/Makefile b/libavfilter/Makefile
-index f059f3f..d00a4d2 100644
+index 282967144b..e4f50409e2 100644
 --- a/libavfilter/Makefile
 +++ b/libavfilter/Makefile
-@@ -156,6 +156,7 @@ OBJS-$(CONFIG_TREMOLO_FILTER)                += af_tremolo.o
+@@ -162,6 +162,7 @@ OBJS-$(CONFIG_TREMOLO_FILTER)                += af_tremolo.o
  OBJS-$(CONFIG_VIBRATO_FILTER)                += af_vibrato.o generate_wave_table.o
  OBJS-$(CONFIG_VOLUME_FILTER)                 += af_volume.o
  OBJS-$(CONFIG_VOLUMEDETECT_FILTER)           += af_volumedetect.o
@@ -12,7 +12,7 @@ index f059f3f..d00a4d2 100644
  OBJS-$(CONFIG_AFIRSRC_FILTER)                += asrc_afirsrc.o
 diff --git a/libavfilter/af_fvad.c b/libavfilter/af_fvad.c
 new file mode 100644
-index 0000000..710437f
+index 0000000000..12c60e6ae9
 --- /dev/null
 +++ b/libavfilter/af_fvad.c
 @@ -0,0 +1,351 @@
@@ -362,16 +362,16 @@ index 0000000..710437f
 +    .description   = NULL_IF_CONFIG_SMALL("Detect audio volume."),
 +    .priv_size     = sizeof(VoiceActivityDetectContext),
 +    .init          = init,
-+    .query_formats = query_formats,
++    FILTER_QUERY_FUNC(query_formats),
 +    .uninit        = uninit,
 +    FILTER_INPUTS(fvad_inputs),
 +    FILTER_OUTPUTS(fvad_outputs),
 +};
 diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
-index ddd6404..293ca17 100644
+index 714468afce..48f677b893 100644
 --- a/libavfilter/allfilters.c
 +++ b/libavfilter/allfilters.c
-@@ -150,6 +150,7 @@ extern const AVFilter ff_af_tremolo;
+@@ -153,6 +153,7 @@ extern const AVFilter ff_af_tremolo;
  extern const AVFilter ff_af_vibrato;
  extern const AVFilter ff_af_volume;
  extern const AVFilter ff_af_volumedetect;
