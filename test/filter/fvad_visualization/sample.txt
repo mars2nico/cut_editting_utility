@@ -1,0 +1,12 @@
+color=c=white:s=1366x768[bg];
+[1:a]aformat=channel_layouts=FC,fvad,asplit=4[a1][a2][a3][a4];
+[a4]aformat=channel_layouts=FC,showwaves=s=683x384:scale=log,
+drawtext=fontsize=30:fontcolor=white:bordercolor=black:borderw=3:text='log scale'[wav];
+[a1]adrawgraph=m1=lavfi.fvad.test.h0.1:m2=lavfi.fvad.test.h0.2:m3=lavfi.fvad.test.h0.3:m4=lavfi.fvad.test.h0.4:min=0:max=0.5:bg=white:slide=scroll:mode=line:s=683x256,drawgrid=0:0:0:32,format=yuv420p,drawtext=fontsize=30:fontcolor=white:bordercolor=black:borderw=3:textfile=drawtext_v1.txt[v1];
+[a2]adrawgraph=m1=lavfi.fvad.test.h0.5:m2=lavfi.fvad.test.h0.6:m3=lavfi.fvad.test.h1.1:m4=lavfi.fvad.test.h1.2:min=0:max=0.5:bg=white:slide=scroll:mode=line:s=683x256,drawgrid=0:0:0:32,format=yuv420p,drawtext=fontsize=30:fontcolor=white:bordercolor=black:borderw=3:textfile=drawtext_v2.txt[v2];
+[a3]adrawgraph=m1=lavfi.fvad.test.h1.3:m2=lavfi.fvad.test.h1.4:m3=lavfi.fvad.test.h1.5:m4=lavfi.fvad.test.h1.6:min=0:max=0.5:bg=white:slide=scroll:mode=line:s=683x256,drawgrid=0:0:0:32,format=yuv420p,drawtext=fontsize=30:fontcolor=white:bordercolor=black:borderw=3:textfile=drawtext_v3.txt[v3];
+[v1]null,   [bg]  overlay=0:0[mid1];
+[v2]null,   [mid1]overlay=0:256[mid2];
+[v3]null,   [mid2]overlay=0:512[mid3];
+[wav]null,   [mid3]overlay=683:384[mid4];
+[0:v]scale=683x384,[mid4]overlay=683:0[out0]
