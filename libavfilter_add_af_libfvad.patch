@@ -12,10 +12,10 @@ index 282967144b..e4f50409e2 100644
  OBJS-$(CONFIG_AFIRSRC_FILTER)                += asrc_afirsrc.o
 diff --git a/libavfilter/af_fvad.c b/libavfilter/af_fvad.c
 new file mode 100644
-index 0000000000..12c60e6ae9
+index 0000000000..38a4287b5f
 --- /dev/null
 +++ b/libavfilter/af_fvad.c
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,349 @@
 +/*
 + * Copyright (c) 2012 Nicolas George
 + *
@@ -48,7 +48,8 @@ index 0000000000..12c60e6ae9
 +#define RING_BUFFER_LENGTH (2048)
 +#define STEP (480)
 +
-+#define AV_FVAD_MAX_STRING_SIZE (64)
++#define AV_FVAD_MAX_STRING_SIZE (16)
++#define AV_FVAD_TEST_Q_NUMBER (27) // Q27
 +
 +typedef struct VoiceActivityDetectContext {
 +    /* a part of member of SilenceDetectContext */
@@ -74,21 +75,12 @@ index 0000000000..12c60e6ae9
 +    char buf[AV_FVAD_MAX_STRING_SIZE];
 +} VoiceActivityDetectContext;
 +
-+static inline char *av_fvad_make_string(char *buf, VoiceActivityDetectContext *vad, int channel)
++static inline char *af_fvad_q_string(char *buf, int32_t h, int q_number)
 +{
-+    FvadDetail detail;
-+    fvad_detail_get(vad->fvad, channel, &detail);
-+    snprintf(buf, AV_FVAD_MAX_STRING_SIZE, "h1_test=%d,h0_test=%d",
-+        detail.h1_test,
-+        detail.h0_test);
++    // hに入力される値の有効桁はだいたい小数点第7位までのためフォーマット指定子は決め打ち
++    snprintf(buf, AV_FVAD_MAX_STRING_SIZE, "%.7lf", h / (double)(1 << q_number));
 +    return buf;
 +}
-+
-+/**
-+ * Convenience macro, the return value should be used only directly in
-+ * function arguments but never stand-alone.
-+ */
-+#define vadstr(vad, channel) av_fvad_make_string(vad->buf, vad, channel)
 +
 +static void set_meta(AVFrame *insamples, int channel, const char *key, char *value)
 +{
@@ -274,6 +266,7 @@ index 0000000000..12c60e6ae9
 +    const int64_t nb_samples_notify = vad->duration;
 +    int vad_channel_size = fvad_detail_get_channels(vad->fvad);
 +    int vad_channel;
++    FvadDetail detail;
 +
 +    if (!vad->first_flag) {
 +        FvadConstNumber vad_const;
@@ -283,7 +276,7 @@ index 0000000000..12c60e6ae9
 +            fvad_detail_get_const(vad->fvad, vad_channel, &vad_const);
 +            snprintf(vad->buf, AV_FVAD_MAX_STRING_SIZE, "weight=%d",
 +                vad_const.kSpectrumWeight);
-+            set_meta(samples, vad_channel, "const", vad->buf);
++            set_meta(samples, vad_channel + 1, "const", vad->buf);
 +        }
 +    }
 +
@@ -318,8 +311,13 @@ index 0000000000..12c60e6ae9
 +	    }
 +    }
 +
-+    for (vad_channel = 0; vad_channel < vad_channel_size; ++vad_channel)
-+        set_meta(samples, vad_channel, "test", vadstr(vad, vad_channel));
++    for (vad_channel = 0; vad_channel < vad_channel_size; ++vad_channel) {
++        fvad_detail_get(vad->fvad, vad_channel, &detail);
++        set_meta(samples, vad_channel + 1, "test.h0",
++            af_fvad_q_string(vad->buf, detail.h0_test, AV_FVAD_TEST_Q_NUMBER));
++        set_meta(samples, vad_channel + 1, "test.h1",
++            af_fvad_q_string(vad->buf, detail.h1_test, AV_FVAD_TEST_Q_NUMBER));
++    }
 +
 +    return ff_filter_frame(inlink->dst->outputs[0], samples);
 +}

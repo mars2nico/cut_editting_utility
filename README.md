@@ -13,9 +13,14 @@
     - astats
     - ametadata
     - dcshift
-    - agate
     - silencedetect
     - fvad (Indicated at following section.)
+  * Video
+    - drawtext
+    - scale
+- Python Modules
+  * click
+  * ffmpeg-python
 
 # Quick Start
 - Clone repository or download and extract this repository's Zip file.
